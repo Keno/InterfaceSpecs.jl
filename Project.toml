@@ -1,0 +1,13 @@
+name = "InterfaceSpecs"
+uuid = "76d5ce2a-8ab4-4fb6-bd4a-ed950fc6a258"
+authors = ["Keno Fischer <keno@juliacomputing.com> and contributors"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
