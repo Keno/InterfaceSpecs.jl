@@ -25,3 +25,17 @@ macro spec(spec, body)
             join(map(x->getfield(prop, x), fieldnames(typeof(prop))), ','), ")")
     end
 end
+
+"""
+    Check whether a type supports a readable property (such as `username`)
+
+Defaults to checking if the type has a field with the property's name
+"""
+supports_readable_property(t::Type, prop::Symbol) = hasfield(t, prop)
+
+"""
+    Check whether a type supports a writeable property (such as `username`)
+
+Defaults to checking if the type has a field with the property's name
+"""
+supports_writeable_property(t::Type, prop::Symbol) = hasfield(t, prop)
