@@ -5,6 +5,7 @@ version = "1.0.0-DEV"
 
 [deps]
 CassetteOverlay = "d78b62d4-37fa-4a6f-acd8-2f19986eb9ee"
+InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 MacroTools = "1914dd2f-81c6-5fcd-8719-6d5c9610ff09"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 z3_jll = "1bc4e1ec-7839-5212-8f2f-0d16b7bd09bc"

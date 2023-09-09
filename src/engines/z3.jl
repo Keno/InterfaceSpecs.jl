@@ -93,9 +93,6 @@ struct Z3Engine <: ProofEngine; end
 
 const z3check = @overlaypass Z3Overlay
 
-function prop_for_type(prop, x)
-    prop(x)()
-end
 
 const z3_intrinsics_map = Dict{Any, Any}(
     Core.Intrinsics.mul_int => mk_bvmul,
