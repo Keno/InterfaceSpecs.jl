@@ -1,18 +1,9 @@
 using InterfaceSpecs
 
-#=
 @interface BasicArithmetic begin
     +(::Number, ::Number)::Number
     -(::Number, ::Number)::Number
     *(::Number, ::Number)::Number
-end
-=#
-function BasicArithmetic()
-    Interface((
-        Tuple{typeof(+), Number, Number}=>Number,
-        Tuple{typeof(-), Number, Number}=>Number,
-        Tuple{typeof(*), Number, Number}=>Number,
-    ))
 end
 
 function eval_poly(x::Number)
@@ -27,4 +18,6 @@ check(InferenceEngine(), InterfaceCheck(Tuple{typeof(eval_poly), Number}, BasicA
 
 # Check that the interface is globally satisfied in the
 # current worldage.
+# TODO: This current stack overflows in inference... The interface is hard to
+# check, because it's extremely recursive.
 check(InferenceEngine(), BasicArithmetic())

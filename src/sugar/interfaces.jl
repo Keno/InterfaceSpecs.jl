@@ -65,5 +65,15 @@ function (ic::InterfaceCheck)()
 end
 
 macro interface(name, sigs)
-    error("Not implemented yet")
+    sig = sigs.args[2]
+    tup = Expr(:tuple, (
+        :(Tuple{
+            Core.Typeof($(sig.args[1].args[1])),
+            $(map(rs->rs.args[end], sig.args[1].args[2:end])...)} => $(sig.args[2])) for
+                sig in filter(x->!isa(x, LineNumberNode), sigs.args))...)
+    esc(quote
+        function $(name)()
+            $(Interface)($tup)
+        end
+    end)
 end
