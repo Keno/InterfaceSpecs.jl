@@ -34,7 +34,6 @@ end
 function (cs::CheckSignature)()
     (sig, rt) = cs.signature
     forall(args->args[1](Base.tail(args)...)::rt, sig)
-    c()
 end
 
 """

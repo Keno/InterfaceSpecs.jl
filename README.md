@@ -38,333 +38,347 @@ way and then use these specifications to provide a smooth path from property-bas
 testing of these specifications to a more formal-methods/type-checking based
 approach to software verification.
 
-## Quick Tour
+## Low-level semantics and their applications
 
-This is a quick tour of the kind of thing you might do with this package. The
-examples in this section have been fully implemented and are working, but this
-is a thin-thread exercise, and anything other than these example is likely to
-not work.
+### The intrinsics
 
-Let's start with a somewhat complicated example. Let's supposed we'd like to
-write down what it means to be iterable:
+The rest of this document discussed a number of different interfaces, APIs and tools
+that could be built. However, it has come to my attention that it wasn't clear that
+these are all intended to be built on the same primitive (just with various variations
+of syntax sugar). Therefore, before we go any further, let's talk about the core intrinsics
+in this proposal and their semantics. Readers interested primarily in the high-level interface
+may skip ahead.
+
+The core of this package's design is the addition of two intrinsics, `forall` and `exists`.
+Both intrinsics are similar in that they operate (semantically) on the abstract space of all
+possible julia objects. Of course, there is infinitely many such objects, so these semantics
+are not implementable computationally directly, but as discussed below, that does not mean
+that an implementation cannot be provided by computing the same semantics in a smarter way.
+
+To understand the semantics of these intrinsics, let us supposed we had an interator `all_julia_objects()`
+that (in no particular order) returned all julia objects (of all possible types currently defined).
+Of course this iterator is countably infinite and not implementable (and not part of the proposal),
+but it has useful explanatory power.
+
+With this assumption, the semantics of `forall` and `exists` are roughly:
 
 ```
-@spec ValidIterType(x) begin
-    @check isa(x, Union{NTuple{2, Any}, Nothing})
+function forall(f, π)
+    check_effects(π, (:effect_free, :noub, :terminates))
+    check_effects(f, (:effect_free_if_inaccessiblemem, :noub, :terminates))
+    for x in all_julia_objects()
+        # N.B.: The iteration order of `all_julia_objects()` is not defined.
+        r = f(try
+            π(x...) # Mostly, see semantic exception for type constructors below
+        catch
+            continue
+        end)
+        # For convenience and to avoid user error.
+        @assert r === nothing || r === true
+    end
 end
 
-@spec Iteration(T::Type) begin
-    @∀ x::T->begin
-        @check ValidIterType(iterate(x))
-        let r = iterate(x)
-            # TODO: This is written loop-peeled this way to play nice with the compiler's
-            # termination analysis to make sure it can prove this for singleton
-            # cases. It would be nice if that wasn't required.
-            r = iterate(x, r[2])
-            while true
-                @check ValidIterType(r)
-                r === nothing && break
-                r = iterate(x, r[2])
-            end
+function exists(π)
+    check_effects(π, (:effect_free, :noub, :terminates))
+    for x in all_julia_objects()
+        # N.B.: The iteration order of `all_julia_objects()` is not defined,
+        # so different invocations of `exists` may produce different witnesses,
+        # and in particular, `exists` is not `:consistent`.
+        try
+            r = π(x)
+            @assert r === nothing || r === true
+            return x
+        catch
+            continue
+        end
+    end
+    throw(#= Implementation defined error type =#)
+end
+```
+
+These semantics are very similar, so it's possible we may want to unify them as
+one intrinsic in the future, but they serve different purposes, so let's treat
+them separately for now.
+
+Informally, `forall` executes some test function `f` for all julia objects that
+match some criteria specified by the projection function `π`. Similarly, `exists`
+produces some julia object that satiesfies the projection function.
+
+Since both the predicate (f) and projection (π) functions are effect-checked, the
+primary question is whether a particular predicate or projection will throw an
+error for a particular input. This is the basis of the theorem proving capabilities
+of these intrinsics.
+
+### A first proof
+
+For example, consider
+```
+forall(Int) do x
+    x + x == 2x
+end
+```
+
+If this call (semantically) does not error, we have proven the property true
+for all values of type `Int`. Even though this example looks simple, there are
+a number of subtle points that need addressing.
+
+1. First, why does `Int` work as a projection function here? The trivial answer
+is that we have a method `Int(x::Int) = x`. The semantic `all_julia_objects`,
+includes integers, and since that method does not throw, all integers are selected
+as the predicate set. Of course, there's more than this method that produces integers,
+e.g. we also have `Int(x::Float64) = convert(Int, x)`, but the only semantically
+determinable question is whether an object is in the predicate set, not how many
+times it was selected.
+
+** Pedantic footnoe: (one might object that since we did not check `consistent`,
+running the same predicate function twice might error in one instance and return
+in the other - however, consistent-cy is defined with respect to a particular
+environment state and the absence of mutation guaranteed by `:effect_free`,
+combined with the non-definedness of the execution order allows us to assume
+egal heap states for egal objects). **
+
+2. At this point one might object that this is a very roundabout way of specifying
+that the prdicate set is all values of type `Int`. And indeed, implementations can and should just
+look at the type of the projection function and make the appropriate conclusion.
+We will see more interesting cases where `π` is not just a type constructor shortly.
+However, in the meantime, this does bring us to one important additional semantic wrinkle: At present,
+constructors do not in fact fully constrain the possible julia values of a given type
+as values can be constructed indirectly using `unsafe_load`, `reinterpret` or `eval(Expr(:new))`.
+To address this, we add a *type constructor exception* to our semantics, where if the
+predicate is a literal type constructor, we extend the predicate set to all values of
+that type, independent of whether they are constructable by their constructors or not.
+In the future, core julia might gain a concept of sealed types where bypassing the
+constructor is disallowed, in which case this exception would of course only apply to
+non-sealed types.
+
+3. Even though the predicate looks trivial (and it basically is), there is actually a fair
+bit going on here. In parcticular, dynamic dispatch needs to be performed as usual,
+so this is an assertion not just about the behavior of `Int` arithmetic, but also about
+the dispatches of `+`, `==` and implicit multiplication.
+
+### Proof checking as compiler optimization
+
+For the particular example we just look at, implementing a correct version of `forall`
+turns out to be relatively simple. In particular, the regular julia compilation
+pipeline is strong enough to fully resolve this question and turn `x + x == 2x`
+into `return true`. Thus, to implement `forall`, we can simply run the regular
+compilation pipeline, see if the predicate function is `return true` (or similar)
+and then compile `forall` to a no-op.
+
+In fact, this is a general sketch for implementing proof-checkers in this scheme.
+The standard julia pipeline is run to ensure the required effects and strip
+away julia-specific semantics around multiple-dispatch, etc, providing a
+monomorphised version of the code that may then be compiled to any target that
+may be capable of performing the proof. In the present example, this was LLVM,
+but the pacakge contains experimental bindings to Z3 as well and the intention
+is to be as agnostic as possible to the proof backend.
+
+The primary benefit of this setup is that it re-uses the entire compiler stack
+built for static compilation of Julia. As in the static compilation case, not
+all julia code will be suitable for use as predicate and projection functions.
+As such, it is important to have tooling that explains to the user what
+limitations they need to impose on their functions in order to be able to use
+them with this scheme. By sharing this implementation work across use cases,
+the burden on tool development can hopefully be minimized.
+
+### When is `π` is not a type
+
+In all of our examples, we have so far used a type as the projection function.
+Let's consider an example where it is not:
+
+```
+function ZeroUniversal(T)
+    forall(a->iszero(a::T)) do a
+        forall(iszero, b->a == b::T)
+        forall(b->iszero(b::T)) do b
+            a == b
         end
     end
 end
 ```
 
-There's a few things going on there, but this spec basically says the following:
+Or, in English-math-language, we might say:
+1. For all `a` of type `T` such that `iszero(a)` (is true), we require that
+    a. for all `b` of type `T` such that `a == b`, we have `iszero(b)` (is true) and
+    b. for all `b` of type `T` such that `iszero(b)`, we have `a == b` (is true)
 
-For a type `T` to be iterable, it needs to satisfy the following for all values
-of the type:
-    - `iterate(x::T)` must exist, have a valid return type, must not throw (nothrow is implicit, see below for explicit error handling support)
-    - The same must be true for `iterate(x, s)` where `s` is any iteration state for this type.
+Or, said equivalently
+1. For all  `a`, `b` of type `T`, `iszero(a)` implies (`iszero(b)` if and only if `a == b`)
 
-Now, what might we be able to do with a spec like this. The simplest thing we could
-perhaps do is exhaustively check it. Semantically, this means replacing the
-`@∀` macro by a loop over all the instances of type and the `@check` macro by
-some sort of `@test` variant. Of course, it is not possible to enumerate all the
-values of a type in most cases (either for semantic or for performance reasons),
-but let's start there. For example, let's check that the `Bool` type (which is
-exhaustively enumerable) correctly implements iteration:
+In particular, this implies that we have no separate representation of implication in this system,
+just a particularly general way of typing the inputs to `forall`. This is of course no ground-breaking
+discovery - dependently typed proof systems are built around this kind of observation.
+However, as our flavor of the intrinsics is somewhat different, I thought it deserved a specific mention.
+
+### `exists` as a test case synthesizer
+
+So for we have seen `forall`, but not `exists`. `exists` functions as usual in
+the quantifier in `forall`-`exists` specs, e.g. we may write
 
 ```
-julia> compute(Iteration(Bool))
-InterfaceSpecs.Fact{0x00000000000082c8}(Iteration(Bool))
+forall(Int) do c
+    forall(Int) do a
+        exists(b->a + b == c)
+    end
+end
 ```
 
-The returned object indicates the interface `Iteration` is satisfied on `Bool`
-(in the world age where this was evaluated). Or said another way, we have proven
-the proposition that `Iteration(Bool)` is satisfied (in the given world age) by
-computation.
+but we can also use `exists` without any outer `forall`, in which case it will
+of course just synthesize a value that matches the projection.
 
-This is all fine and good, but obviously most types can't be exhaustively checked,
-as we see when we try the same thing on Int:
 ```
-julia> compute(Iteration(Int))
-ERROR: No exhaustive checking for type Int64. Please provide a proof engine.
-Stacktrace:
- [1] error(s::String)
-   @ Base ./error.jl:35
- [2] forall(prop::var"#11#16", T::Type)
-   @ InterfaceSpecs ~/.julia/dev/InterfaceSpecs/src/runtime.jl:54
-```
+# Make sure that this is a super safe password
+julia> safe_password(s::String) = s[1] == s[7] && lowercase(s[2]) == s[4]
 
-However, in many cases all we want is some confidence that our code is correct,
-in which case it might suffice to check a few of the common corner cases. This
-kind of approach is often referred to as property-based testing and we can use it
-here:
-```
-julia> check(PropertyCheck(), Iteration(Int))
+julia> exists(safe_password)
+"tBRbeAt"
+
+julia> safe_password("tBRbeAt")
 true
 ```
 
-This API uses fixed (but user-extensible through multiple dispatch for custom types
-for course) lists of examples to check against the interface.
+This is the connection to property checking. We can generally use the
+same specs written using `forall` and spot check them on particular
+instances, either written by the user or synthesized via `exists`.
 
-Here's an example to see what happens if we don't satisfy the interface:
+### `exists` as a proof-check request
+
+Consider the following struct
 ```
-julia> struct NonIterable; x::Int; end
-
-julia> InterfaceSpecs.testinstances(::Type{NonIterable}) = (NonIterable(1),)
-
-julia> check(PropertyCheck(), Iteration(NonIterable))
-ERROR: MethodError: no method matching iterate(::NonIterable)
-
-Closest candidates are:
-  iterate(::Union{LinRange, StepRangeLen})
-   @ Base range.jl:880
-  iterate(::Union{LinRange, StepRangeLen}, ::Integer)
-   @ Base range.jl:880
-  iterate(::T) where T<:Union{Base.KeySet{<:Any, <:Dict}, Base.ValueIterator{<:Dict}}
-   @ Base dict.jl:698
-  ...
-
-```
-
-Up to this point, there's really no magic here, just a somewhat fancy way of
-writing pre-canned tests for a particular interface that a package author might
-use in their own test suite. And that's sort of the point. I think 90% of the
-value here is just standardizing what it looks like to write these kinds of
-specs for interfaces and giving people the tools to easily check them on a few
-cases. Everything else is just bonus fairy dust, but since it's cool let's take
-a look at it anyway.
-
-As people many people know, the julia compiler has a fairly strong static model
-of what it means to be julia code, so it is natural that we can use it to prove
-things about Julia code. For example, in this case, the julia compiler is strong
-enough to prove that `Int` satisfies the iteration interface:
-
-```
-julia> check(InferenceEngine(), Iteration(Int))
-InterfaceSpecs.Fact{0x00000000000082ce}(Iteration(Int64))
-
-julia> check(InferenceEngine(), Iteration(NonIterable))
-ERROR: Inference was unable to prove termination for prop #11
-```
-
-Note that here `check` returned a `Fact` (as `compute` did in the first example),
-because the proposition was proven correct. For the two property-based tests,
-it just returned `true`, because even though it did not fail, it did not actually
-prove that there are no failing cases.
-
-This latest example, also introduces the concept of `engines`, which can be used
-to either test or prove props. One major design point of this package is that I
-do not really want to be in the business of telling people how to write their
-test or proof packages, I just want to provide an integration point that serves
-as the clearing house between the spec authors and the people working on
-test/verification packages (of course in practice things might turn out messier,
-but let's start there). Software verification is a notoriously hard thing to do
-and it would be unsurprising to need to use different engines to prove different
-kinds of propositions (or even parts of the same proposition), which this
-interface is intended to provide.
-
-Of particular note is that these specs do not operate solely on the type domain
-(though of course if you expect to use julia inference to prove things, they
-better be mostly type-domain queries). For example, here is a spec that might say
-something about the correctness of the iseven function:
-
-```
-@spec MultIsEven(T::Type) begin
-    @∀ x::T->iseven(x * 2)
-end
-```
-
-As before, we can establish this for `Bool`, but not `Int` by direct computation:
-```
-julia> compute(MultIsEven(Bool))
-InterfaceSpecs.Fact{0x00000000000082d7}(MultIsEven(Bool))
-
-julia> compute(MultIsEven(Int))
-ERROR: No exhaustive checking for type Int64. Please provide a proof engine.
-Stacktrace:
- [1] error(s::String)
-   @ Base ./error.jl:35
- [2] forall(prop::var"#31#36", T::Type)
-   @ InterfaceSpecs ~/.julia/dev/InterfaceSpecs/src/runtime.jl:54
-```
-
-However, in this case, Julia's type inference cannot prove the proposition,
-because the julia inference lattice does not model these properties in the
-value domain:
-
-```
-check(InferenceEngine(), MultIsEven(Int))
-ERROR: Inference was unable to prove nothrow for prop #5
-Stacktrace:
- [1] error(s::String)
-   @ Base ./error.jl:35
- [2] (::InterfaceSpecs.var"##InferenceOverlay#295")(#unused#::typeof(InterfaceSpecs.forall), prop::Function, T::Type)
-   @ InterfaceSpecs ~/.julia/dev/InterfaceSpecs/src/engines/inference.jl:19
-```
-
-We need something stronger, so why not just go all the way to an SMT solver:
-```
-julia> check(Z3Engine(), MultIsEven(Int))
-InterfaceSpecs.Fact{0x00000000000082c4}(MultIsEven(Int64))
-```
-
-Here again, we were able to prove the prop conclusively, so we got back a `Fact`.
-
-## Implementation Details
-
-Semantically, a `prop` that can be checked is nothing other than a julia
-function that takes no arguments. The prop is considered "true" if the function
-terminates and does not error. In addition, this packages provides the `forall`
-intrinsic (currently, potentially more things in the future), that encodes a
-semantic map over all instances of a type, which is of course not in general
-possible to evaluate. Testers/Solvers then provide their own implementation for `forall`.
-
-The macro DSL is provided for convenience, but it should always be possible to
-write props manually. E.g. the above iteration spec can be written as:
-```
-struct Iteration
-    T::Type
-end
-
-struct Iteration_x{T}
-    x::T
-end
-
-function (this::Iteration)()
-    forall(Iteration_x, this.T)
-end
-
-function (this::Iteration_x)()
-    ValidIterType(iterate(this.x))()
-    r = iterate(this.x)
-    r = iterate(this.x, r[2])
-    while true
-        ValidIterType(r)()
-        r === nothing && break
-        r = iterate(this.x, r[2])
+@sealed struct Fact{T}
+    spec::T
+    valid_worlds #= To support invalidations, ignore for now =#
+    proof #= optional for introspection =#
+    function Fact(spec)
+        check_effects(spec, (:effect_free, :noub, :terminates))
+        spec()
+        new(spec, get_valid_worlds(), nothing)
     end
 end
 ```
 
-## Not yet implemented things I'd like to do
-
-### Restricted Ranges
-I would like to be able to specify specs on a subset of easily, e.g.
-```
-@spec DivCorrect(T::Type) begin
-    @∀ x::(T|!iszero(x))->isone(div(x, x))
-end
-```
-
-### Error Annotations
-Similar to the above, but implicitly by specifying possibly thrown errors:
-```
-@spec DivCorrect(T::Type) begin
-    @∀ x::T->isone(div(x, x)) @throws DivideByZeroError
-end
-```
-
-(i.e. either the spec is satisfied or throws an error of the given type)
-
-### Associating specs with abstract types
-
-I think this is reasonably simple, but there should be some way to provide a
-`spec` for an abstract type, and a simple function that package authors can
-call to check the associated specs for all the types that they implement in
-their functions.
-
-### Checking function against specs
-
-Similar to, but the opposite of the previous. If a package author writes an
-abstractly typed function, it should be possible to check for the absence
-of method errors assuming that a concrete instance of a type implements its
-spec. I don't think this is particularly hard to do either, but not implemented here.
-
-### Mixing solver engines
-
-In current versions of julia, inference is not very good at proving termination,
-which is required in the current semantics. As a result, the usefulness of the
-inference solver is limited for any prop that involves iteration, e.g.
+With the above encoding, where we equate true proofs with appropriately
+effect-checked functions, the construction of `Fact` requires the truth
+of the fact asserted and `exists` may be used to request the system
+to attempt a proof:
 
 ```
-julia> check(InferenceEngine(), Iteration(NTuple{2, Int}))
-ERROR: Inference was unable to prove termination for prop #21
-Stacktrace:
- [1] error(s::String)
-   @ Base ./error.jl:35
- [2] (::InterfaceSpecs.var"##InferenceOverlay#295")(#unused#::typeof(InterfaceSpecs.forall), prop::Function, T::Type)
-   @ InterfaceSpecs ~/.julia/dev/InterfaceSpecs/src/engines/inference.jl:16
-```
-
-However, many of these termination checks are rather trivial and some of the other
-solver engines should be able to take care of them no problem. It would thus be nice
-to have a way for inference to request a `prop` be solved using some other
-(potentially more powerful) solver engine in order to satisfy its goals.
-
-## Encoding various common scenarios
-
-### Simple type-based interfaces
-
-One of the most common scenarios is probably just a list of methods that must
-exist for a particular, e.g.
-
-```
-@spec ArrayMethods(T <: AbstractArray) begin
-    @∀ (A::T)->begin
-        @check(isa(axes(A), Tuple))
-
-        # Linear indexing - the other indexing are more complicated, because
-        # the signatures are dimension dependent
-        @∀ i::Int->A[i]::eltype(A) @throws BoundsError
+struct Commutativity{T, Op}; end
+function (::Commutativity{T, Op})() where {T, Op}
+    forall(NTuple{2, T}) do (a, b)
+        forall(Op) do op
+            op(a, b) == op(b, a)
+        end
     end
 end
 ```
 
-we might consider a shorthand for this like:
 ```
-@interface ArrayMethods(T <: AbstractArray) begin
-    axes(::T)::Tuple
-    getindex(::T, ::Int)::eltype(A) @throws BoundsError
+julia> exists(Fact{Commutativity{Int, +}}) # Request the system to attempt to prove commutativity of +(::Int, ::Int)
+#= Fact object with optional proof or error =#
+```
+
+## One higher-level interface: purely type-based interfaces
+
+A long-standing feature request in the julia community has been the addition
+of some notion of higher-level specification of interfaces such as abstract
+arrays. There's two primary purposes for this kind of systems:
+
+1. Implementers of new array types want to know that they have correctly implemented
+the array type.
+
+2. Users want to know that they are not accidentally relying on implementation details
+of a particular `AbstractArray`, but rather that their code is generic over all `AbstractArray`s
+
+One primary issue that is often brought up with this is that in julia, types are used for dispatch,
+not correctness, so the mere existence of a particular method does not guarantee that the method
+actually conforms to the interface. For `AbstractArray`, one such invariant may be that:
+```
+A[i] = x
+@assert x == A[i]
+```
+The mere existence of `getindex` and `setindex` do not assure that the array actually does something
+with it, only that no immediate method error will be thrown.
+
+Of course, the system we have just presented is perfectly capable of encoding behavioral invariants
+in addition to type-based one. However, there are potential robustness challenges. The system just
+presented is completely general and it is not completely clear what particular subset of julia
+code will be proveable on any particular backend. As a result, the full system may be hard to use
+correctly.
+
+One natural way out of this connundrum is to create a more restrictive view into the full system
+that is sufficiently powerful to specify interfaces of moderate complexity, but yet restricted
+enough to have some chance of being checked automatically. By *view* here, I mean some higher-level
+abstraction that provides a restricted version of the capability, but is nevertheless semantically
+representable by the same intrinsics and that uses the same top-level entry points as the
+full system.
+
+This package includes such an abstraction as the `Interface` spec in the `sugar` directory.
+Let us walk through it as both an example of the usage of the lower level interface and a
+description of the high-level interface.
+
+First, we must consider what it is that we actually want to prove. There's a few options,
+but a reasonable choice is to try to prove that in the cases we're interested in, a method
+of the desired signature exists (no MethodErrors get thrown), returns a value of the correct type.
+So, let's write such a spec (for a single singature for the time being):
+
+```
+struct CheckSignature
+    signature::Pair{Signature, Type}
+end
+
+function (cs::CheckSignature)()
+    (sig, rt) = cs.signature
+    forall(args->args[1](Base.tail(args)...)::rt, sig)
 end
 ```
 
-Ideally the macro would be restricted in such way that the `InferenceEngine`
-prover is likely to succeed in most simple cases (though of course inference
-being able to prove things can in general depend on arbitrary computation).
-
-
-### Contracts
-We might want to provide another special case for contracts, e.g.:
+This is basically what we want, but does prohibit all errors, not just `MethodError`.
+We can relax this by wrapping in try/catch
 
 ```
-@contract function sort(a::A)
-    @requires WellOrdered(eltype(a))
-    @provides issorted(Ω)
-    [...]
+struct DoesNotThrow{T, E}
+    spec::T
+    errT::E
+end
+DoesNotThrow{<:Any,E}(spec) where {E} =
+    DoesNotThrow(spec, E.instance)
+function (spec::DoesNotThrow)()
+    try
+        spec.spec()
+    catch err
+        @show err
+        @assert !isa(err, spec.errT)
+    end
+end
+const DoesNotThrowMethodErorr{T} = DoesNotThrow{T, MethodError}
+```
+
+Then we just define an interface as a collection of just checked signatures that do not throw:
+
+```
+struct Interface
+    signatures::Tuple{Vararg{Pair{Signature, Type}}}
+end
+(iface::Interface)() = foreach(sig->DoesNotThrow(CheckSignature(sig), MethodError)(), iface.signatures)
+```
+
+We can also check a particular other method under the assumption that an interface
+is correctly defined:
+
+```
+struct InterfaceCheck
+    checksig::Signature
+    iface
+end
+function (ic::InterfaceCheck)()
+    forall(ic.iface) do _
+        DoesNotThrow(CheckSignature(ic.checksig), MethodError)()
+    end
 end
 ```
 
-which would just be a short hand for
-```
-function sort(x::T)
-    [...]
-end
-
-@spec sort_well_formed(A::Type)
-    @∀ (a::A|WellOrdered(eltype(a)))->issorted(sort(a))
-end
-```
+To understand why this works, remember from above the correspondence between
+projection and implication. In particular, to prove `InterfaceCheck`, it is
+not necessary to prove that the relevant interface holds, only that the
+predicate holds if the interface does.
