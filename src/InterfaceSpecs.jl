@@ -1,6 +1,7 @@
 module InterfaceSpecs
 
-export PropertyCheck, RandomCheck, InferenceEngine, Z3Engine, check, compute, @spec
+export PropertyCheck, RandomCheck, InferenceEngine, Z3Engine, check, compute, @spec,
+    forall, exists
 
 abstract type Proof; end
 
@@ -19,6 +20,7 @@ include("engines/property.jl")
 include("engines/randomized.jl")
 include("engines/inference.jl")
 include("engines/z3.jl")
+include("engines/auto.jl")
 
 function check(::Engine, prop)
     error("Checking not implemented for this engine")

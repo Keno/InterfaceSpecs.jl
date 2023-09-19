@@ -40,23 +40,27 @@ Checks a prop by direct evaluation.
 compute
 
 """
-    forall(prop, T)
+    forall(prop, T; engine=AutoEngine())
 
 Checks the proposition `prop` (more precisely, the proposition returned by
 the closure `prop`, which is often a prop constructor) for all elements of the
 type `T`. Since exhaustive testing is generally not possible, this usually
 requires proof engine support.
 """
-function forall(prop, T)
+function forall(prop, T; engine = AutoEngine())
     if Base.issingletontype(T)
         return compute(prop(T))
     end
-    error("No exhaustive checking for type $T. Please provide a proof engine.")
+    _forall(engine, prop, T)
 end
 
 function forall(prop, T::Type{Bool})
     prop(true)()
     prop(false)()
+end
+
+function exists(prop; engine = AutoEngine())
+    _exists(engine, prop)
 end
 
 struct IsCheckPass
