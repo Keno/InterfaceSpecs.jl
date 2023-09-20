@@ -56,7 +56,8 @@ are not implementable computationally directly, but as discussed below, that doe
 that an implementation cannot be provided by computing the same semantics in a smarter way.
 
 To understand the semantics of these intrinsics, let us supposed we had an interator `all_julia_objects()`
-that (in no particular order) returned all julia objects (of all possible types currently defined).
+that (in no particular order) returned all (newly instantiated - see below for notes on mutation)
+julia objects (of all possible types currently defined).
 Of course this iterator is countably infinite and not implementable (and not part of the proposal),
 but it has useful explanatory power.
 
@@ -277,6 +278,64 @@ end
 julia> exists(Fact{Commutativity{Int, +}}) # Request the system to attempt to prove commutativity of +(::Int, ::Int)
 #= Fact object with optional proof or error =#
 ```
+
+### Thoughts on mutation
+
+As described above, the `forall` function requires `:effect_free_if_inaccessiblemem` effects,
+i.e. the compiler needs to prove that the predicate does not perform any unbounded heap
+mutation. However, heap mutation that is bounded to heap objects whose lifetime does not
+exceed the duration of the `forall` body is permitted. This is intended to be a practical
+tradeoff that allows predicates that make use of mutation, while still requiring that the
+(non)-execution of the `forall` predicate is not externally observable.
+
+A related issue that arises in the presence of mutation and identity is the question of the
+range of the `all_julia_objects` pseudo-intrinsics discussed above. As mentioned in the side-node,
+we consider newly allocated object hierarchies here, not existing julia objects. In particular,
+`exists` will never return a mutable object that aliases an existing mutable object:
+
+```
+julia> x = Ref{Int}(0)
+
+julia> exists(y->x === y)
+# Errors, no such object
+```
+
+The question then arises how to perform verification of side-effecting code, where the side-effect
+is an essential part the property to verify. This area needs some further thought, but the current
+thought is that this should be done by compining an external transformation that transforms
+the unbounded side-effect to a verification-compatible bounded side effect, e.g.:
+
+```
+@overlaypass struct ShadowHeap
+    heap::IdDict{GlobalRef, Any}
+end
+
+@overlay ShadowHeap function getglobal(m::Module, s::Symbol)
+    g = nonoverlay(getglobal, m, s)
+    isconst(m, s) ? return g : get(getpass().heap, GlobalRef(m, s), g)
+end
+
+@overlay ShadowHeap function setglobal!(m::Module, s::Symbol, v)
+    getpass().heap[GlobalRef(m, s)] = v
+end
+
+# Plus magic definition to turn global ref/set into corresponding intrinsic calls
+```
+
+Then, we can query side effects as usual, but the modification is bounded under the hood:
+```
+exists(s) do
+    ShadowHeap() do
+        global my_global_val
+        setglobal!(@__MODULE__, s, 4)
+        my_global_val == 4
+    end
+end
+```
+
+Naturally, any such modeling might need custom integration with the backend proof system
+to be properly embeddable. Hopefuly this can be addressed just as any compiler plugin
+would.
 
 ## One higher-level interface: purely type-based interfaces
 
