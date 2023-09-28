@@ -63,7 +63,7 @@ but it has useful explanatory power.
 
 With this assumption, the semantics of `forall` and `exists` are roughly:
 
-```
+```jl
 function forall(f, π)
     check_effects(π, (:effect_free, :noub, :terminates))
     check_effects(f, (:effect_free_if_inaccessiblemem, :noub, :terminates))
@@ -113,7 +113,7 @@ of these intrinsics.
 ### A first proof
 
 For example, consider
-```
+```jl
 forall(Int) do x
     x + x == 2x
 end
@@ -187,7 +187,7 @@ the burden on tool development can hopefully be minimized.
 In all of our examples, we have so far used a type as the projection function.
 Let's consider an example where it is not:
 
-```
+```jl
 function ZeroUniversal(T)
     forall(a->iszero(a::T)) do a
         forall(iszero, b->a == b::T)
@@ -216,7 +216,7 @@ However, as our flavor of the intrinsics is somewhat different, I thought it des
 So for we have seen `forall`, but not `exists`. `exists` functions as usual in
 the quantifier in `forall`-`exists` specs, e.g. we may write
 
-```
+```jl
 forall(Int) do c
     forall(Int) do a
         exists(b->a + b == c)
@@ -245,7 +245,7 @@ instances, either written by the user or synthesized via `exists`.
 ### `exists` as a proof-check request
 
 Consider the following struct
-```
+```jl
 @sealed struct Fact{T}
     spec::T
     valid_worlds #= To support invalidations, ignore for now =#
@@ -263,7 +263,7 @@ effect-checked functions, the construction of `Fact` requires the truth
 of the fact asserted and `exists` may be used to request the system
 to attempt a proof:
 
-```
+```jl
 struct Commutativity{T, Op}; end
 function (::Commutativity{T, Op})() where {T, Op}
     forall(NTuple{2, T}) do (a, b)
@@ -274,7 +274,7 @@ function (::Commutativity{T, Op})() where {T, Op}
 end
 ```
 
-```
+```jl
 julia> exists(Fact{Commutativity{Int, +}}) # Request the system to attempt to prove commutativity of +(::Int, ::Int)
 #= Fact object with optional proof or error =#
 ```
@@ -293,7 +293,7 @@ range of the `all_julia_objects` pseudo-intrinsics discussed above. As mentioned
 we consider newly allocated object hierarchies here, not existing julia objects. In particular,
 `exists` will never return a mutable object that aliases an existing mutable object:
 
-```
+```jl
 julia> x = Ref{Int}(0)
 
 julia> exists(y->x === y)
@@ -305,7 +305,7 @@ is an essential part the property to verify. This area needs some further though
 thought is that this should be done by compining an external transformation that transforms
 the unbounded side-effect to a verification-compatible bounded side effect, e.g.:
 
-```
+```jl
 @overlaypass struct ShadowHeap
     heap::IdDict{GlobalRef, Any}
 end
@@ -323,7 +323,7 @@ end
 ```
 
 Then, we can query side effects as usual, but the modification is bounded under the hood:
-```
+```jl
 exists(s) do
     ShadowHeap() do
         global my_global_val
@@ -352,7 +352,7 @@ of a particular `AbstractArray`, but rather that their code is generic over all 
 One primary issue that is often brought up with this is that in julia, types are used for dispatch,
 not correctness, so the mere existence of a particular method does not guarantee that the method
 actually conforms to the interface. For `AbstractArray`, one such invariant may be that:
-```
+```jl
 A[i] = x
 @assert x == A[i]
 ```
@@ -381,7 +381,7 @@ but a reasonable choice is to try to prove that in the cases we're interested in
 of the desired signature exists (no MethodErrors get thrown), returns a value of the correct type.
 So, let's write such a spec (for a single singature for the time being):
 
-```
+```jl
 struct CheckSignature
     signature::Pair{Signature, Type}
 end
@@ -395,7 +395,7 @@ end
 This is basically what we want, but does prohibit all errors, not just `MethodError`.
 We can relax this by wrapping in try/catch
 
-```
+```jl
 struct DoesNotThrow{T, E}
     spec::T
     errT::E
@@ -415,7 +415,7 @@ const DoesNotThrowMethodErorr{T} = DoesNotThrow{T, MethodError}
 
 Then we just define an interface as a collection of just checked signatures that do not throw:
 
-```
+```jl
 struct Interface
     signatures::Tuple{Vararg{Pair{Signature, Type}}}
 end
@@ -425,7 +425,7 @@ end
 We can also check a particular other method under the assumption that an interface
 is correctly defined:
 
-```
+```jl
 struct InterfaceCheck
     checksig::Signature
     iface
